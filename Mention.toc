@@ -1,0 +1,9 @@
+## Interface: 11500
+## Title: Mention
+## Notes: Mention players using @ symbol with autocomplete
+## Author: Turleynerd
+## Version: 1.0
+## SavedVariables: MentionDB
+
+Mention.lua
+MentionOptions.lua
