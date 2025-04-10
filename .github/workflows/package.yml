@@ -1,0 +1,77 @@
+name: Package Addon
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Override version (leave empty to use tag)"
+        required: false
+        default: ""
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone Repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Get Version
+        id: get_version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+          else
+            # Extract version from the tag (remove 'v' prefix)
+            VERSION=${GITHUB_REF#refs/tags/v}
+            echo "VERSION=$VERSION" >> $GITHUB_ENV
+          fi
+          
+          # If it's not a tag, use the short commit hash
+          if [ -z "$VERSION" ] || [ "$VERSION" == "$GITHUB_REF" ]; then
+            VERSION=$(git rev-parse --short HEAD)
+            echo "VERSION=$VERSION" >> $GITHUB_ENV
+          fi
+
+      - name: Update TOC Version
+        run: |
+          sed -i "s/## Version: .*/## Version: ${{ env.VERSION }}/" Mention.toc
+          
+      - name: Create Addon Package Directory
+        run: |
+          mkdir -p .release/Mention
+          
+      - name: Copy Files to Package Directory
+        run: |
+          cp -r Mention.lua Mention.toc MentionOptions.lua README.md .release/Mention/
+          # Create an empty Sounds directory
+          mkdir -p .release/Mention/Sounds
+          # Copy logo files
+          cp logo.png logo_400.png .release/Mention/
+
+      - name: Package Addon
+        working-directory: .release
+        run: |
+          zip -r Mention-${{ env.VERSION }}.zip Mention
+          
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          name: Mention v${{ env.VERSION }}
+          draft: false
+          prerelease: false
+          files: |
+            .release/Mention-${{ env.VERSION }}.zip
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: Mention-${{ env.VERSION }}
+          path: .release/Mention-${{ env.VERSION }}.zip
