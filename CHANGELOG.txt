@@ -1,0 +1,19 @@
+Mention Addon - Changelog
+=======================
+
+v1.0.2 (2025-04-10)
+-------------------
+* Added sound notifications when your name is mentioned in chat
+* Added options to customize sound notifications
+* Improved autocomplete UI
+* Player names are inserted without the prefix symbol
+* Added slash commands for controlling sound settings
+* Added help command with detailed usage information
+
+v1.0.0 (2025-04-10)
+-------------------
+* Initial release
+* Basic name mention functionality
+* Autocomplete for player names
+* Customizable prefix
+* Options panel

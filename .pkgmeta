@@ -1,0 +1,15 @@
+package-as: Mention
+
+enable-nolib-creation: no
+
+ignore:
+  - README.md
+  - .github
+  - .git
+  - CreateLogo400.ps1
+  - ConvertToPNG.ps1
+  - ExportLogo.html
+
+license-output: LICENSE.txt
+
+manual-changelog: CHANGELOG.txt
