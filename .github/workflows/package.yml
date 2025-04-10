@@ -11,6 +11,11 @@ on:
         required: false
         default: ""
 
+# Add explicit permissions required for creating releases
+permissions:
+  contents: write
+  packages: write
+
 jobs:
   package:
     runs-on: ubuntu-latest
