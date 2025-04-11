@@ -1,27 +1,10 @@
 local addonName, addon = ...
 
--- Safety check to ensure addon functions are available
-if not addon then
-    print("Mention Options Error: addon table not available!")
-    addon = {}
-    
-    -- Create proxy functions if the real ones aren't available
-    addon.GetPrefix = function() return "@" end
-    addon.SetPrefix = function(prefix) print("Cannot save prefix: " .. prefix) end
-    addon.EnableSound = function(enable) end
-    addon.IsSoundEnabled = function() return true end
-    addon.SetSound = function(sound) end
-    addon.GetSound = function() return "" end
-    addon.GetSoundList = function() return { ["None"] = "" } end
-    
-    -- Try to access the global _G.Mention table if it exists
-    if _G.Mention then
-        print("Mention Options: Using global Mention table")
-        addon = _G.Mention
-    end
-else
-    print("Mention Options: addon table successfully loaded")
-end
+-- No need for a safety check anymore as we're using the shared addon table
+-- This will be directly available from the addon's lua files
+
+-- We don't need any proxy functions or global table access
+-- The addon table should already contain all the functions we need
 
 -- Create the options panel
 local optionsPanel = CreateFrame("Frame")

@@ -1,11 +1,10 @@
 -- Mention - Addon for @name autocomplete in chat
 local addonName, addon = ...
 
--- Create global reference for the options panel to access
-_G.Mention = {}
+-- Use only the addon table for all functionality, avoiding global namespace pollution
 local MentionFrame = CreateFrame("Frame")
 local autocompleteFrame = nil
-local playerList = {}
+local cachedPlayerNames = {} -- Cached player names with priorities
 local currentPrefix = "@"
 local MAX_SUGGESTIONS = 8 -- Maximum number of suggestions to show
 local selectedIndex = 1 -- Currently selected item in the dropdown
@@ -23,17 +22,93 @@ local defaultSounds = {
     ["Ready Check"] = "Sound\\Interface\\ReadyCheck.ogg"
 }
 
--- Simple error handling wrapper
-local function TryCatch(func)
-    local status, error = pcall(func)
-    if not status then
-        print("|cffff0000Mention Error:|r " .. (error or "Unknown error"))
-        return false
-    end
-    return true
+-- Error reporting function (simplified without pcall)
+local function ReportError(message)
+    print("|cffff0000Mention Error:|r " .. (message or "Unknown error"))
 end
 
--- Initialize saved variables
+-- Named sort function to avoid creating closures
+local function SortPlayersByPriority(a, b)
+    if a.priority == b.priority then
+        return a.name < b.name  -- Alphabetically if same priority
+    else
+        return a.priority > b.priority  -- Higher priority first
+    end
+end
+
+-- Forward declarations for functions called before their definitions
+local UpdateCachedPlayerNames, UpdateGroupRoster, UpdateGuildRoster
+
+-- Update party/raid members in cache
+UpdateGroupRoster = function()
+    -- Check if in a group
+    if IsInGroup() then
+        local playerName = UnitName("player")
+        if IsInRaid() then
+            for i = 1, GetNumGroupMembers() do
+                local name = GetRaidRosterInfo(i)
+                if name and name ~= "" and name ~= _G.UNKNOWNOBJECT and name ~= playerName then
+                    cachedPlayerNames[name] = 2 -- High priority
+                end
+            end
+        else
+            for i = 1, 4 do
+                local name = UnitName("party"..i)
+                if name and name ~= "" and name ~= _G.UNKNOWNOBJECT and name ~= playerName then
+                    cachedPlayerNames[name] = 2 -- High priority
+                end
+            end
+        end
+    end
+end
+
+-- Update guild members in cache
+UpdateGuildRoster = function()
+    if not IsInGuild() then return end
+    
+    local playerName = UnitName("player")
+    local numMembers = GetNumGuildMembers()
+    if numMembers > 0 then
+        for i = 1, numMembers do
+            local name = GetGuildRosterInfo(i)
+            if name and name ~= "" and name ~= playerName then
+                -- Extract name without realm if it contains a hyphen
+                if string.find(name, "-") then
+                    local shortName = string.match(name, "([^-]+)")
+                    if shortName and shortName ~= "" then
+                        -- Only add the short name (without server) for better display
+                        cachedPlayerNames[shortName] = 1 -- Medium priority
+                    end
+                else
+                    -- If no hyphen, just add the name as is
+                    cachedPlayerNames[name] = 1 -- Medium priority
+                end
+            end
+        end
+    end
+end
+
+-- Update cached player names (both group and guild)
+UpdateCachedPlayerNames = function()
+    -- Clear the current cache
+    wipe(cachedPlayerNames)
+    
+    -- Always add yourself first with highest priority
+    local playerName = UnitName("player")
+    if playerName then
+        cachedPlayerNames[playerName] = 3 -- Highest priority
+    end
+    
+    -- Update party/raid roster
+    UpdateGroupRoster()
+    
+    -- Update guild roster
+    if IsInGuild() then
+        UpdateGuildRoster()
+    end
+end
+
+-- Initialize saved variables and set up event handlers
 function MentionFrame:OnLoad()
     if not MentionDB then
         MentionDB = {
@@ -52,8 +127,12 @@ function MentionFrame:OnLoad()
         currentSound = MentionDB.sound
     end
     
-    -- Create our default sound files if they don't exist
-    local mentionSoundPath = "Interface\\AddOns\\Mention\\Sounds"
+    -- Register for events to update player caches
+    self:RegisterEvent("GROUP_ROSTER_UPDATE")
+    self:RegisterEvent("GUILD_ROSTER_UPDATE")
+    
+    -- Initialize our cached player lists
+    UpdateCachedPlayerNames()
     
     print("|cff00ff00Mention|r addon loaded. Type " .. currentPrefix .. "name to mention players")
 end
@@ -102,74 +181,28 @@ local function CreateAutocompleteFrame()
     return frame
 end
 
--- Collect all player names with priority
+-- Use cached player names for maximum performance
 local function GetPlayerNames(searchText)
     local results = {}
-    local playerName = UnitName("player")
-    local nameLookup = {} -- For duplicate checking
     local count = 0
     searchText = string.lower(searchText or "")
     
-    -- Helper function to safely add a name
-    local function AddName(name, priority)
-        if not name or name == "" or name == "Unknown" or nameLookup[name] then
-            return
-        end
-        
+    -- Iterate through our cached player names (much more efficient)
+    for name, priority in pairs(cachedPlayerNames) do
         -- Check if name matches search text
         if searchText == "" or string.find(string.lower(name), searchText, 1, true) then
-            nameLookup[name] = true
             count = count + 1
-            table.insert(results, {name = name, priority = priority})
+            results[count] = {name = name, priority = priority}
         end
     end
-    
-    -- Always add player's own name with highest priority
-    AddName(playerName, 0)
-    
-    -- Try to get group members first
-    if IsInRaid() then
-        for i = 1, 40 do
-            -- Use protected API calls - just skip if there's an error
-            local success, name = pcall(function() return UnitName("raid"..i) end)
-            if success then AddName(name, 1) end
-        end
-    elseif IsInGroup() then
-        for i = 1, 4 do
-            local success, name = pcall(function() return UnitName("party"..i) end)
-            if success then AddName(name, 1) end
-        end
-    end
-    
-    -- Then get guild members (if not too many results already)
-    if IsInGuild() and count < 50 then
-        -- Try-catch for guild roster functions
-        TryCatch(function()
-            local numMembers = GetNumGuildMembers()
-            for i = 1, math.min(numMembers, 100) do -- Limit to first 100 to avoid freezing
-                local name, _, _, _, _, _, _, _, online = GetGuildRosterInfo(i)
-                if name and online then
-                    -- Strip realm name if present
-                    name = string.match(name, "([^-]+)") or name
-                    AddName(name, 2)
-                end
-            end
-        end)
-    end
-    
-    -- Sort results by priority then alphabetically
-    table.sort(results, function(a, b)
-        if a.priority == b.priority then
-            return a.name < b.name
-        else
-            return a.priority < b.priority
-        end
-    end)
+    -- Sort results using a named function to avoid creating closures
+    -- We sort in reverse order so higher priority values are at the top
+    table.sort(results, SortPlayersByPriority)
     
     -- Only return top MAX_SUGGESTIONS results
     local finalResults = {}
     for i = 1, math.min(MAX_SUGGESTIONS, #results) do
-        table.insert(finalResults, results[i])
+        finalResults[i] = results[i]
     end
     
     return finalResults
@@ -184,7 +217,19 @@ local function SelectName(editBox, index)
     local text = editBox:GetText() or ""
     local pattern = currentPrefix .. "[^%s]*"
     
-    -- Just insert the name without the prefix
+    -- Check for secure command to avoid taint issues
+    local firstWord = string.match(text, "^(/[^ ]+)") or ""
+    local isSecure = firstWord:find("/cast") or firstWord:find("/use") or 
+                   firstWord:find("/target") or firstWord:find("/tar") or 
+                   firstWord:find("/focus") or firstWord:find("/click")
+    
+    if isSecure then
+        -- For secure commands, don't auto-replace text - could cause taint
+        autocompleteFrame:Hide()
+        return
+    end
+    
+    -- Insert the name without the prefix
     local newText = string.gsub(text, pattern, currentMatches[index].name .. " ")
     editBox:SetText(newText)
     editBox:SetCursorPosition(#newText)
@@ -197,14 +242,11 @@ end
 
 -- Accept the currently selected suggestion (used by tab completion)
 local function AcceptSelection(editBox)
-    TryCatch(function()
-        if not autocompleteFrame or not autocompleteFrame:IsShown() or #currentMatches == 0 then return false end
-        
-        -- Select the name at the current index
-        SelectName(editBox, selectedIndex)
-        return true
-    end)
-    return false
+    if not autocompleteFrame or not autocompleteFrame:IsShown() or #currentMatches == 0 then return false end
+    
+    -- Select the name at the current index
+    SelectName(editBox, selectedIndex)
+    return true
 end
 
 -- Update the autocomplete dropdown with player names
@@ -252,29 +294,33 @@ local function UpdateAutocomplete(editBox, searchText)
         if i <= #currentMatches then
             button.text:SetText(currentMatches[i].name)
             
-            -- Highlight the selected index
-            if not button.highlight then
-                button.highlight = button:CreateTexture(nil, "HIGHLIGHT")
-                button.highlight:SetAllPoints()
-                button.highlight:SetTexture("Interface\\Buttons\\UI-Listbox-Highlight")
-                button.highlight:SetBlendMode("ADD")
-            end
-            
+            -- Use the same highlight style that was created during button initialization
+            -- for both tab selection and mouseover
             if i == selectedIndex then
-                -- Selected button - show highlight
-                button.highlight:Show()
+                -- Selected button - use a simple background color for selection
+                local selectionBg = button.selectionBg or button:CreateTexture(nil, "BACKGROUND")
+                if not button.selectionBg then
+                    selectionBg:SetAllPoints()
+                    selectionBg:SetColorTexture(1, 1, 1, 0.2) -- Same style as mouseover
+                    button.selectionBg = selectionBg
+                end
+                button.selectionBg:Show()
+                -- Change text color to yellow when highlighted
+                button.text:SetTextColor(1, 1, 0) -- Yellow text
                 button:SetAlpha(1.0)
             else
-                -- Not selected - hide highlight
-                button.highlight:Hide()
+                -- Not selected - hide selection background
+                if button.selectionBg then
+                    button.selectionBg:Hide()
+                end
+                -- Reset text color to default white
+                button.text:SetTextColor(1, 1, 1) -- Default white text
                 button:SetAlpha(0.85)
             end
             
             button:SetScript("OnClick", function()
-                TryCatch(function()
-                    -- Replace the search text with the player name
-                    SelectName(editBox, i)
-                end)
+                -- Replace the search text with the player name
+                SelectName(editBox, i)
             end)
             
             -- Update mouseover behavior to change selection
@@ -294,77 +340,73 @@ end
 
 -- Process chat box text and show mention dropdown
 local function ProcessChatText(editBox)
-    TryCatch(function()
-        -- Get current text and cursor position
-        local text = editBox:GetText() or ""
-        local cursorPos = editBox:GetCursorPosition()
-        
-        -- Don't proceed if the text is too short
-        if #text < 1 or cursorPos < 1 then 
-            if autocompleteFrame then autocompleteFrame:Hide() end
-            return 
-        end
-        
-        -- Get text up to cursor position
-        local textBeforeCursor = string.sub(text, 1, cursorPos)
-        
-        -- Look for the mention prefix at the end of the text
-        local lastWord = string.match(textBeforeCursor, "[^ ]+$") or ""
-        
-        -- If it doesn't start with our prefix, hide dropdown and return
-        if string.sub(lastWord, 1, #currentPrefix) ~= currentPrefix then
-            if autocompleteFrame then autocompleteFrame:Hide() end
-            return
-        end
-        
-        -- Extract the search text after the prefix
-        local searchText = string.sub(lastWord, #currentPrefix + 1)
-        
-        -- Update autocomplete with the search text
-        UpdateAutocomplete(editBox, searchText)
-    end)
+    -- Get current text and cursor position
+    local text = editBox:GetText() or ""
+    local cursorPos = editBox:GetCursorPosition()
+    
+    -- Don't proceed if the text is too short
+    if #text < 1 or cursorPos < 1 then 
+        if autocompleteFrame then autocompleteFrame:Hide() end
+        return 
+    end
+    
+    -- Get text up to cursor position
+    local textBeforeCursor = string.sub(text, 1, cursorPos)
+    
+    -- Look for the mention prefix at the end of the text
+    local lastWord = string.match(textBeforeCursor, "[^ ]+$") or ""
+    
+    -- If it doesn't start with our prefix, hide dropdown and return
+    if string.sub(lastWord, 1, #currentPrefix) ~= currentPrefix then
+        if autocompleteFrame then autocompleteFrame:Hide() end
+        return
+    end
+    
+    -- Extract the search text after the prefix
+    local searchText = string.sub(lastWord, #currentPrefix + 1)
+    
+    -- Update autocomplete with the search text
+    UpdateAutocomplete(editBox, searchText)
 end
 
 -- Cycle through the list of suggestions when Tab is pressed
 local function CycleTabCompletion(editBox)
-    return TryCatch(function()
-        -- If autocomplete is visible, cycle to next item
-        if autocompleteFrame and autocompleteFrame:IsShown() and #currentMatches > 0 then
-            -- Move selection to next item
-            selectedIndex = selectedIndex + 1
-            if selectedIndex > #currentMatches then selectedIndex = 1 end
-            
-            -- Update the highlighting
-            UpdateAutocomplete(editBox)
-            return true
-        end
+    -- If autocomplete is visible, cycle to next item
+    if autocompleteFrame and autocompleteFrame:IsShown() and #currentMatches > 0 then
+        -- Move selection to next item
+        selectedIndex = selectedIndex + 1
+        if selectedIndex > #currentMatches then selectedIndex = 1 end
         
-        -- If no dropdown is visible yet, check if we're typing a name with prefix
-        local text = editBox:GetText() or ""
-        local cursorPos = editBox:GetCursorPosition()
+        -- Update the highlighting
+        UpdateAutocomplete(editBox)
+        return true
+    end
+    
+    -- If no dropdown is visible yet, check if we're typing a name with prefix
+    local text = editBox:GetText() or ""
+    local cursorPos = editBox:GetCursorPosition()
         
-        -- Check if we're in the middle of mentioning someone
-        local textBeforeCursor = string.sub(text, 1, cursorPos)
-        local lastWord = string.match(textBeforeCursor, "[^ ]+$") or ""
-        
-        -- If it doesn't start with our prefix, don't tab complete
-        if string.sub(lastWord, 1, #currentPrefix) ~= currentPrefix then
-            return false
-        end
-        
-        -- Extract the search text after the prefix
-        local searchText = string.sub(lastWord, #currentPrefix + 1)
-        
-        -- Get matching player names and show dropdown
-        UpdateAutocomplete(editBox, searchText)
-        
-        -- If we got matches, return true to indicate we handled the tab
-        if autocompleteFrame and autocompleteFrame:IsShown() then
-            return true
-        end
-        
+    -- Check if we're in the middle of mentioning someone
+    local textBeforeCursor = string.sub(text, 1, cursorPos)
+    local lastWord = string.match(textBeforeCursor, "[^ ]+$") or ""
+    
+    -- If it doesn't start with our prefix, don't tab complete
+    if string.sub(lastWord, 1, #currentPrefix) ~= currentPrefix then
         return false
-    end) or false
+    end
+    
+    -- Extract the search text after the prefix
+    local searchText = string.sub(lastWord, #currentPrefix + 1)
+    
+    -- Get matching player names and show dropdown
+    UpdateAutocomplete(editBox, searchText)
+    
+    -- If we got matches, return true to indicate we handled the tab
+    if autocompleteFrame and autocompleteFrame:IsShown() then
+        return true
+    end
+    
+    return false
 end
 
 -- Add an Enter keybinding to select the current name
@@ -438,67 +480,56 @@ end
 
 -- Hook into all chat edit boxes
 local function HookChatFrames()
-    TryCatch(function()
-        for i = 1, NUM_CHAT_WINDOWS do
-            local chatFrame = _G["ChatFrame"..i]
-            if chatFrame and chatFrame.editBox then
-                local editBox = chatFrame.editBox
-                
-                -- Hook the OnTextChanged event
-                editBox:HookScript("OnTextChanged", function(self)
-                    ProcessChatText(self)
-                end)
-                
-                -- Hook the special key handlers
-                HookSpecialKeys(editBox)
-            end
+    for i = 1, NUM_CHAT_WINDOWS do
+        local chatFrame = _G["ChatFrame"..i]
+        if chatFrame and chatFrame.editBox then
+            local editBox = chatFrame.editBox
+            
+            -- Hook the OnTextChanged event
+            editBox:HookScript("OnTextChanged", function(self)
+                ProcessChatText(self)
+            end)
+            
+            -- Hook the special key handlers
+            HookSpecialKeys(editBox)
         end
-    end)
+    end
 end
 
 -- Check if a message contains the player's name and play a sound if it does
 local function CheckMessageForNameMention(message, sender)
-    TryCatch(function()
-        -- Don't play a sound for your own messages
-        if sender == UnitName("player") then return end
-        
-        -- Get player name
-        local playerName = UnitName("player")
-        if not playerName then return end
-        
-        -- Check if message contains player name as a whole word
-        -- Use pattern matching to find the name with word boundaries
-        local pattern = "%f[%a]" .. playerName .. "%f[^%a]"
-        if string.find(message, pattern) then
-            -- Play sound if enabled
-            if soundEnabled and currentSound and currentSound ~= "" then
-                PlaySoundFile(currentSound, "Master")
-            end
+    -- Don't play a sound for your own messages
+    if sender == UnitName("player") then return end
+    
+    -- Get player name
+    local playerName = UnitName("player")
+    if not playerName then return end
+    
+    -- Check if message contains player name as a whole word
+    -- Use pattern matching to find the name with word boundaries
+    local pattern = "%f[%a]" .. playerName .. "%f[^%a]"
+    if string.find(message, pattern) then
+        -- Play sound if enabled
+        if soundEnabled and currentSound and currentSound ~= "" then
+            PlaySoundFile(currentSound, "Master")
         end
-    end)
+    end
 end
 
 -- Hook all chat frames to monitor for mentions
 local function HookChatFramesForNameMention()
-    TryCatch(function()
-        -- Process chat event
-        local function OnChatMessage(chatFrame, event, message, playerName, ...)
-            CheckMessageForNameMention(message, playerName)
-        end
-        
-        -- Hook all relevant chat events
-        local chatEvents = {
-            "CHAT_MSG_SAY", "CHAT_MSG_YELL", "CHAT_MSG_PARTY", "CHAT_MSG_PARTY_LEADER",
-            "CHAT_MSG_RAID", "CHAT_MSG_RAID_LEADER", "CHAT_MSG_INSTANCE_CHAT",
-            "CHAT_MSG_INSTANCE_CHAT_LEADER", "CHAT_MSG_GUILD", "CHAT_MSG_OFFICER",
-            "CHAT_MSG_WHISPER", "CHAT_MSG_BN_WHISPER"
-        }
-        
-        for i = 1, #chatEvents do
-            local event = chatEvents[i]
-            MentionFrame:RegisterEvent(event)
-        end
-    end)
+    -- Hook all relevant chat events
+    local chatEvents = {
+        "CHAT_MSG_SAY", "CHAT_MSG_YELL", "CHAT_MSG_PARTY", "CHAT_MSG_PARTY_LEADER",
+        "CHAT_MSG_RAID", "CHAT_MSG_RAID_LEADER", "CHAT_MSG_INSTANCE_CHAT",
+        "CHAT_MSG_INSTANCE_CHAT_LEADER", "CHAT_MSG_GUILD", "CHAT_MSG_OFFICER",
+        "CHAT_MSG_WHISPER", "CHAT_MSG_BN_WHISPER"
+    }
+    
+    for i = 1, #chatEvents do
+        local event = chatEvents[i]
+        MentionFrame:RegisterEvent(event)
+    end
 end
 
 -- Get available sounds
@@ -531,18 +562,10 @@ MentionFrame:SetScript("OnEvent", function(self, event, arg1, arg2, arg3, arg4, 
     if event == "ADDON_LOADED" and arg1 == addonName then
         self:OnLoad()
     elseif event == "PLAYER_LOGIN" then
-        TryCatch(function()
-            -- Use a frame-based timer approach instead of C_Timer for better Classic compatibility
-            local timerFrame = CreateFrame("Frame")
-            local elapsed = 0
-            timerFrame:SetScript("OnUpdate", function(self, delta)
-                elapsed = elapsed + delta
-                if elapsed >= 1 then
-                    HookChatFrames()
-                    HookChatFramesForNameMention()
-                    timerFrame:SetScript("OnUpdate", nil)
-                end
-            end)
+        C_Timer.After(1, function()
+            -- Initialize player names and hook chat frames
+            HookChatFrames()
+            HookChatFramesForNameMention()
         end)
     -- Process chat messages for name mentions
     elseif event:find("CHAT_MSG_") then
@@ -600,7 +623,8 @@ local function GetSoundList()
     return GetAvailableSounds()
 end
 
--- Add functions to both the addon table and the global Mention table
+-- Add functions to the addon namespace only
+-- This avoids global namespace pollution
 addon.SetPrefix = SetPrefix
 addon.GetPrefix = GetPrefix
 addon.EnableSound = EnableSound
@@ -608,15 +632,6 @@ addon.IsSoundEnabled = IsSoundEnabled
 addon.SetSound = SetSound
 addon.GetSound = GetSound
 addon.GetSoundList = GetSoundList
-
--- Make functions available globally
-_G.Mention.SetPrefix = SetPrefix
-_G.Mention.GetPrefix = GetPrefix
-_G.Mention.EnableSound = EnableSound
-_G.Mention.IsSoundEnabled = IsSoundEnabled
-_G.Mention.SetSound = SetSound
-_G.Mention.GetSound = GetSound
-_G.Mention.GetSoundList = GetSoundList
 
 -- Slash command for controlling the addon
 SLASH_MENTION1 = "/mention"
