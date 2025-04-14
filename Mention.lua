@@ -563,10 +563,20 @@ MentionFrame:SetScript("OnEvent", function(self, event, arg1, arg2, arg3, arg4, 
         self:OnLoad()
     elseif event == "PLAYER_LOGIN" then
         C_Timer.After(1, function()
+            -- Request guild roster update (for Classic)
+            if IsInGuild() then
+                GuildRoster()
+            end
             -- Initialize player names and hook chat frames
             HookChatFrames()
             HookChatFramesForNameMention()
         end)
+    elseif event == "GROUP_ROSTER_UPDATE" then
+        -- Group composition changed, update cached player names
+        UpdateGroupRoster()
+    elseif event == "GUILD_ROSTER_UPDATE" then
+        -- Guild roster updated, refresh cached guild members
+        UpdateGuildRoster()
     -- Process chat messages for name mentions
     elseif event:find("CHAT_MSG_") then
         local message = arg1
